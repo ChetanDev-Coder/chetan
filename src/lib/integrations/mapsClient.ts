@@ -14,6 +14,9 @@ export function getMapsConfigStatus(): MapsConfigStatus {
 }
 
 export class MapsRoutingService {
+  private static distanceCache = new Map<string, number>();
+  private static readonly MAX_CACHE_SIZE = 10000;
+
   /**
    * Calculates travel distance, estimated duration, and waypoint path
    */
@@ -21,8 +24,11 @@ export class MapsRoutingService {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
     if (apiKey && apiKey.length > 5 && !apiKey.includes('placeholder')) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
       try {
-        // Call Google Maps Platform Routes API v2
+        // Call Google Maps Platform Routes API v2 with strict timeout
         const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
           method: 'POST',
           headers: {
@@ -30,6 +36,7 @@ export class MapsRoutingService {
             'X-Goog-Api-Key': apiKey,
             'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline',
           },
+          signal: controller.signal,
           body: JSON.stringify({
             origin: {
               location: {
@@ -52,6 +59,8 @@ export class MapsRoutingService {
             computeAlternativeRoutes: false,
           }),
         });
+
+        clearTimeout(timeoutId);
 
         if (response.ok) {
           const data = await response.json();
@@ -76,6 +85,7 @@ export class MapsRoutingService {
           }
         }
       } catch (err) {
+        clearTimeout(timeoutId);
         console.warn('Google Routes API request failed or timed out. Falling back to deterministic route calculation.', err);
       }
     }
@@ -113,9 +123,16 @@ export class MapsRoutingService {
   }
 
   /**
-   * Standard Haversine formula
+   * Standard Haversine formula with O(1) coordinate-pair memoization cache
    */
   static calculateHaversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    // Generate normalized cache key (4 decimal places ~ 11 meters precision)
+    const cacheKey = `${lat1.toFixed(4)},${lon1.toFixed(4)}_${lat2.toFixed(4)},${lon2.toFixed(4)}`;
+    const cached = this.distanceCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const R = 6371; // Earth's radius in km
     const dLat = this.deg2rad(lat2 - lat1);
     const dLon = this.deg2rad(lon2 - lon1);
@@ -123,7 +140,17 @@ export class MapsRoutingService {
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
       Math.cos(this.deg2rad(lat1)) * Math.cos(this.deg2rad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
+    const distance = R * c;
+
+    if (this.distanceCache.size >= this.MAX_CACHE_SIZE) {
+      // Evict first 1000 items (FIFO strategy for bounded memory)
+      const keysToDelete = Array.from(this.distanceCache.keys()).slice(0, 1000);
+      for (const k of keysToDelete) {
+        this.distanceCache.delete(k);
+      }
+    }
+    this.distanceCache.set(cacheKey, distance);
+    return distance;
   }
 
   private static deg2rad(deg: number): number {

@@ -171,6 +171,11 @@ export interface Assignment {
   previousAssignmentId?: string;
 }
 
+export interface EnrichedAssignment extends Assignment {
+  donation?: DonationItem;
+  recipient?: Organization;
+}
+
 export interface WorkflowEvent {
   id: string;
   workflowId: string; // usually assignmentId or donationId

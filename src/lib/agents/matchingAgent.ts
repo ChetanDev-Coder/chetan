@@ -207,8 +207,12 @@ export class MatchingAgent {
     }
 
     // 3. Assemble recommendations with explanations and constraint proofs
+    const eligibleMap = new Map<string, EligibilityEvaluation>(
+      eligibleCandidates.map(e => [e.organization.id, e])
+    );
+
     const recommendations: MatchRecommendation[] = rankingResult.rankedResults.map(ranked => {
-      const evalData = eligibleCandidates.find(e => e.organization.id === ranked.recipientId)!;
+      const evalData = eligibleMap.get(ranked.recipientId) || eligibleCandidates[0];
       return {
         id: `rec_${donation.id}_${ranked.recipientId}`,
         donationId: donation.id,

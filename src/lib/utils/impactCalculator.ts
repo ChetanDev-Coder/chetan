@@ -19,20 +19,35 @@ export class ImpactCalculator {
     // Filter delivered assignments with verified weights
     const deliveredAssignments = assignments.filter(a => a.status === 'DELIVERED');
     
-    // Verified weight MUST come only from scale/driver verified delivery records
-    const verifiedDeliveredKg = deliveredAssignments.reduce(
-      (acc, a) => acc + (a.actualQuantityDeliveredKg || 0),
-      0
+    // Build O(1) hash map index for instantaneous donation lookup
+    const donationMap = new Map<string, DonationItem>(
+      donations.map(d => [d.id, d])
     );
 
-    // Discrepancy calculation between estimated donation and actual verified delivered
+    // Single-pass O(A) aggregation of verified delivered weights & discrepancy
+    let verifiedDeliveredKg = 0;
     let totalInitialForDelivered = 0;
-    deliveredAssignments.forEach(asg => {
-      const matchDonation = donations.find(d => d.id === asg.donationId);
+    let totalMinutes = 0;
+    let timedCount = 0;
+
+    for (let i = 0; i < deliveredAssignments.length; i++) {
+      const asg = deliveredAssignments[i];
+      verifiedDeliveredKg += asg.actualQuantityDeliveredKg || 0;
+
+      const matchDonation = donationMap.get(asg.donationId);
       if (matchDonation) {
         totalInitialForDelivered += matchDonation.estimatedKg;
       }
-    });
+
+      if (asg.proposedAt && asg.deliveredAt) {
+        const diffMs = Date.parse(asg.deliveredAt) - Date.parse(asg.proposedAt);
+        const mins = diffMs / (1000 * 60);
+        if (mins > 0 && mins < 10000) {
+          totalMinutes += mins;
+          timedCount++;
+        }
+      }
+    }
 
     const discrepancyRatePercent = totalInitialForDelivered > 0
       ? Number((Math.abs(verifiedDeliveredKg - totalInitialForDelivered) / totalInitialForDelivered * 100).toFixed(1))
@@ -50,19 +65,6 @@ export class ImpactCalculator {
       ? Number(((deliveredAssignments.length / totalCompletedOrFailed) * 100).toFixed(1))
       : 100;
 
-    // Average assignment time
-    let totalMinutes = 0;
-    let timedCount = 0;
-    deliveredAssignments.forEach(asg => {
-      if (asg.proposedAt && asg.deliveredAt) {
-        const diffMs = new Date(asg.deliveredAt).getTime() - new Date(asg.proposedAt).getTime();
-        const mins = diffMs / (1000 * 60);
-        if (mins > 0 && mins < 10000) {
-          totalMinutes += mins;
-          timedCount++;
-        }
-      }
-    });
     const averageAssignmentMinutes = timedCount > 0 ? Math.round(totalMinutes / timedCount) : 45;
 
     // Recovered assignments

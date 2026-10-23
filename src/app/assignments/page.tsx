@@ -18,11 +18,11 @@ import {
   ShieldCheck,
   Zap,
 } from 'lucide-react';
-import { Assignment, DonationItem, Organization } from '@/lib/types';
+import { EnrichedAssignment, DonationItem, Organization } from '@/lib/types';
 
 export default function AssignmentsPage() {
   const { currentRole, currentUser } = useRole();
-  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [assignments, setAssignments] = useState<EnrichedAssignment[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedAssignmentId, setSelectedAssignmentId] = useState<string>('');
 
@@ -66,8 +66,8 @@ export default function AssignmentsPage() {
   }, []);
 
   const activeAssignment = assignments.find((a) => a.id === selectedAssignmentId) || assignments[0];
-  const activeDonation = (activeAssignment as unknown as { donation?: DonationItem })?.donation;
-  const activeRecipient = (activeAssignment as unknown as { recipient?: Organization })?.recipient;
+  const activeDonation = activeAssignment?.donation;
+  const activeRecipient = activeAssignment?.recipient;
 
   // 1. Recipient Accepts Assignment
   const handleAccept = async () => {
@@ -229,6 +229,8 @@ export default function AssignmentsPage() {
 
       {statusMessage && (
         <div
+          role="status"
+          aria-live="polite"
           className={`p-4 rounded-xl border text-xs flex items-center gap-2 ${
             statusMessage.type === 'success'
               ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
@@ -255,8 +257,8 @@ export default function AssignmentsPage() {
           <div className="space-y-2">
             {assignments.map((asg) => {
               const isSelected = asg.id === (activeAssignment?.id);
-              const d = (asg as unknown as { donation?: DonationItem })?.donation;
-              const r = (asg as unknown as { recipient?: Organization })?.recipient;
+              const d = asg.donation;
+              const r = asg.recipient;
 
               return (
                 <button

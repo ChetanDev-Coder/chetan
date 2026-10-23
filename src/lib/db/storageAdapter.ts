@@ -29,13 +29,18 @@ interface AppDatabase {
   workflowEvents: WorkflowEvent[];
   auditLogs: AuditLogEntry[];
   forecasts: Map<string, SurplusForecast>;
-  processedIdempotencyKeys: Set<string>;
+  // Secondary index for O(1) assignment lookup by donationId
+  donationToAssignmentMap: Map<string, string>;
+  // Bounded TTL map: idempotencyKey -> timestamp
+  processedIdempotencyKeys: Map<string, number>;
 }
 
 declare global {
   // eslint-disable-next-line no-var
   var __rescueGridDb: AppDatabase | undefined;
 }
+
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24-hour expiration
 
 function initializeDatabase(): AppDatabase {
   const db: AppDatabase = {
@@ -47,13 +52,21 @@ function initializeDatabase(): AppDatabase {
     workflowEvents: [...SEED_WORKFLOW_EVENTS],
     auditLogs: [...SEED_AUDIT_LOGS],
     forecasts: new Map(),
-    processedIdempotencyKeys: new Set(['idemp_seed_asg_1', 'idemp_seed_asg_2', 'idemp_seed_asg_delivered_1']),
+    donationToAssignmentMap: new Map(),
+    processedIdempotencyKeys: new Map([
+      ['idemp_seed_asg_1', Date.now()],
+      ['idemp_seed_asg_2', Date.now()],
+      ['idemp_seed_asg_delivered_1', Date.now()],
+    ]),
   };
 
   SEED_USERS.forEach(u => db.users.set(u.id, { ...u }));
   SEED_ORGANIZATIONS.forEach(o => db.organizations.set(o.id, { ...o }));
   SEED_DONATIONS.forEach(d => db.donations.set(d.id, { ...d }));
-  SEED_ASSIGNMENTS.forEach(a => db.assignments.set(a.id, { ...a }));
+  SEED_ASSIGNMENTS.forEach(a => {
+    db.assignments.set(a.id, { ...a });
+    db.donationToAssignmentMap.set(a.donationId, a.id);
+  });
   SEED_FORECASTS.forEach(f => db.forecasts.set(f.id, { ...f }));
 
   return db;
@@ -180,8 +193,9 @@ export const dbRepository = {
     return getDb().assignments.get(id);
   },
   getAssignmentByDonationId(donationId: string): Assignment | undefined {
-    const all = Array.from(getDb().assignments.values());
-    return all.find(a => a.donationId === donationId);
+    const assignmentId = getDb().donationToAssignmentMap.get(donationId);
+    if (!assignmentId) return undefined;
+    return getDb().assignments.get(assignmentId);
   },
   listAssignments(filters?: { status?: string; recipientId?: string; volunteerId?: string }): Assignment[] {
     let list = Array.from(getDb().assignments.values());
@@ -194,7 +208,7 @@ export const dbRepository = {
     if (filters?.volunteerId) {
       list = list.filter(a => a.volunteerId === filters.volunteerId);
     }
-    return list.sort((a, b) => new Date(b.proposedAt).getTime() - new Date(a.proposedAt).getTime());
+    return list.sort((a, b) => Date.parse(b.proposedAt) - Date.parse(a.proposedAt));
   },
   createAssignment(data: Omit<Assignment, 'id'>): Assignment {
     const id = `asg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -203,7 +217,8 @@ export const dbRepository = {
       id,
     };
     getDb().assignments.set(id, created);
-    getDb().processedIdempotencyKeys.add(data.idempotencyKey);
+    getDb().donationToAssignmentMap.set(data.donationId, id);
+    this.registerIdempotencyKey(data.idempotencyKey);
     return created;
   },
   updateAssignment(id: string, updates: Partial<Assignment>): Assignment | undefined {
@@ -211,15 +226,34 @@ export const dbRepository = {
     if (!item) return undefined;
     const updated = { ...item, ...updates };
     getDb().assignments.set(id, updated);
+    if (updates.donationId) {
+      getDb().donationToAssignmentMap.set(updates.donationId, id);
+    }
     return updated;
   },
 
-  // Idempotency
+  // Idempotency with memory-safe TTL eviction
   isIdempotencyKeyUsed(key: string): boolean {
-    return getDb().processedIdempotencyKeys.has(key);
+    const recordedAt = getDb().processedIdempotencyKeys.get(key);
+    if (!recordedAt) return false;
+    // Check if expired (>24 hours)
+    if (Date.now() - recordedAt > IDEMPOTENCY_TTL_MS) {
+      getDb().processedIdempotencyKeys.delete(key);
+      return false;
+    }
+    return true;
   },
   registerIdempotencyKey(key: string): void {
-    getDb().processedIdempotencyKeys.add(key);
+    // Evict expired keys if map exceeds 5,000 entries
+    if (getDb().processedIdempotencyKeys.size > 5000) {
+      const now = Date.now();
+      for (const [k, ts] of getDb().processedIdempotencyKeys.entries()) {
+        if (now - ts > IDEMPOTENCY_TTL_MS) {
+          getDb().processedIdempotencyKeys.delete(k);
+        }
+      }
+    }
+    getDb().processedIdempotencyKeys.set(key, Date.now());
   },
 
   // Workflow Events
